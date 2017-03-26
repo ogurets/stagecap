@@ -6,8 +6,15 @@ LOCAL_SRC_FILES:=         \
         stagecap.cpp
 
 LOCAL_SHARED_LIBRARIES := \
-	libstagefright liblog libutils libbinder
-
+	libstagefright \
+	liblog \
+	libutils \
+	libcutils \
+	libbinder \
+	libmedia  \
+	libcamera_client \
+	
+	
 LOCAL_C_INCLUDES:= \
 	$(JNI_H_INCLUDE) \
 	frameworks/base/media/libstagefright \

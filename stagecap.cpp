@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <utils/Log.h>
 #include <media/stagefright/CameraSource.h> 
 #include <media/stagefright/MPEG4Writer.h>
 #include <media/MediaPlayerInterface.h>
@@ -17,6 +18,13 @@
 #include <camera/ICamera.h>
 #include <camera/Camera.h>
 #include <camera/CameraParameters.h>
+
+#include <media/MediaRecorderBase.h>
+enum CameraFlags {
+    FLAGS_SET_CAMERA = 1L << 0,
+    FLAGS_HOT_CAMERA = 1L << 1,
+};
+
 
 // http://www.xuebuyuan.com/1636118.html
 
@@ -109,79 +117,111 @@ private:
 
 #endif
 
-    enum CameraFlags {
-        FLAGS_SET_CAMERA = 1L << 0,
-        FLAGS_HOT_CAMERA = 1L << 1,
-    };
-
+sp<MediaSource> createSource(const char *filename)
+{
     sp<Camera> mCamera;
-    sp<ISurface> mPreviewSurface;
-    sp<IMediaRecorderClient> mListener;
-    sp<MediaWriter> mWriter;
-
-	#include <media/MediaRecorderBase.h>
+    //sp<IMediaRecorderClient> mListener;
+    //sp<MediaWriter> mWriter;
 
     video_source mVideoSource;
     output_format mOutputFormat;
     video_encoder mVideoEncoder;
     bool mUse64BitFileOffset;
-    int32_t mVideoWidth, mVideoHeight;
-    int32_t mFrameRate;
+    int32_t mVideoWidth = 640;
+	int32_t mVideoHeight = 480;
+    int32_t mFrameRate = 30;
     int32_t mVideoBitRate;
-    int32_t mAudioBitRate;
-    int32_t mAudioChannels;
-    int32_t mSampleRate;
-    int32_t mInterleaveDurationUs;
-    int32_t mIFramesIntervalSec;
-    int32_t mCameraId;
+    //int32_t mAudioBitRate;
+    //int32_t mAudioChannels;
+    //int32_t mSampleRate;
+    //int32_t mInterleaveDurationUs;
+    //int32_t mIFramesIntervalSec;
+    int32_t mCameraId = 0;
     int32_t mVideoEncoderProfile;
     int32_t mVideoEncoderLevel;
     int32_t mMovieTimeScale;
     int32_t mVideoTimeScale;
-    int32_t mAudioTimeScale;
-    int64_t mMaxFileSizeBytes;
-    int64_t mMaxFileDurationUs;
+    //int32_t mAudioTimeScale;
+    //int64_t mMaxFileSizeBytes;
+    //int64_t mMaxFileDurationUs;
     int64_t mTrackEveryTimeDurationUs;
-    int32_t mRotationDegrees;  // Clockwise 
+    //int32_t mRotationDegrees;  // Clockwise 
+	
+	String8 mParams;
+    int mOutputFd;
+    int32_t mFlags = 0;
 
-sp<MediaSource> createSource(const char *filename)
-{
-    sp<MediaSource> source;
+	sp<MediaSource> source;
     sp<MediaExtractor> extractor;
 
 	if (strncasecmp(filename, "camera", 6)) {
 		// Not camera
 		extractor = MediaExtractor::Create(new FileSource(filename));
+		if (extractor == NULL) {
+			return NULL;
+		}
+
+		size_t num_tracks = extractor->countTracks();
+
+		sp<MetaData> meta;
+		for (size_t i = 0; i < num_tracks; ++i) {
+			meta = extractor->getTrackMetaData(i);
+			CHECK(meta.get() != NULL);
+
+			const char *mime;
+			if (!meta->findCString(kKeyMIMEType, &mime)) {
+				continue;
+			}
+
+			if (strncasecmp(mime, "video/", 6)) {
+				continue;
+			}
+
+			source = extractor->getTrack(i);
+			break;
+		}
+
+		return source;
 	} else {
 		// Camera
-		sp<Camera> camera = Camera::connect(0);
-		extractor = MediaExtractor::Create(CameraSource::Create());
+        mCamera = Camera::connect(mCameraId);
+        if (mCamera == 0) {
+            LOGE("Camera connection could not be established.");
+            return NULL;
+        }
+        mFlags &= ~FLAGS_HOT_CAMERA;
+        mCamera->lock(); 
+
+		CameraParameters params(mCamera->getParameters());
+		params.setPreviewSize(mVideoWidth, mVideoHeight);
+		params.setPreviewFrameRate(mFrameRate);
+		String8 s = params.flatten();
+		if (OK != mCamera->setParameters(s)) {
+			LOGE("Could not change settings."
+				 " Someone else is using camera %d?", mCameraId);
+			return NULL;
+		}
+		CameraParameters newCameraParams(mCamera->getParameters());
+
+		// Check on video frame size
+		int frameWidth = 0, frameHeight = 0;
+		newCameraParams.getPreviewSize(&frameWidth, &frameHeight);
+		if (frameWidth  < 0 || frameWidth  != mVideoWidth ||
+			frameHeight < 0 || frameHeight != mVideoHeight) {
+			LOGE("Failed to set the video frame size to %dx%d",
+					mVideoWidth, mVideoHeight);
+			return NULL;
+		}
+
+		// Check on video frame rate
+		int frameRate = newCameraParams.getPreviewFrameRate();
+		if (frameRate < 0 || (frameRate - mFrameRate) != 0) {
+			LOGE("Failed to set frame rate to %d fps. The actual "
+				 "frame rate is %d", mFrameRate, frameRate);
+		}
+
+		return CameraSource::CreateFromCamera(mCamera);
 	}
-    if (extractor == NULL) {
-        return NULL;
-    }
-
-    size_t num_tracks = extractor->countTracks();
-
-    sp<MetaData> meta;
-    for (size_t i = 0; i < num_tracks; ++i) {
-        meta = extractor->getTrackMetaData(i);
-        CHECK(meta.get() != NULL);
-
-        const char *mime;
-        if (!meta->findCString(kKeyMIMEType, &mime)) {
-            continue;
-        }
-
-        if (strncasecmp(mime, "video/", 6)) {
-            continue;
-        }
-
-        source = extractor->getTrack(i);
-        break;
-    }
-
-    return source;
 }
 
 enum {
