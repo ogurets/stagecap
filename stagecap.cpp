@@ -1,6 +1,7 @@
 #define LOG_TAG "stagecap"
 
 #include <stdio.h>
+#include <signal.h>
 #include <utils/Log.h>
 #include <media/stagefright/CameraSource.h> 
 #include <media/stagefright/MPEG4Writer.h>
@@ -226,25 +227,25 @@ public:
     video_source mVideoSource;
     output_format mOutputFormat;
     video_encoder mVideoEncoder;
-    bool mUse64BitFileOffset;
+    //bool mUse64BitFileOffset;
     int32_t mVideoWidth = 320;
 	int32_t mVideoHeight = 240;
     int32_t mFrameRate = 30;
-    int32_t mVideoBitRate;
+    //int32_t mVideoBitRate;
     //int32_t mAudioBitRate;
     //int32_t mAudioChannels;
     //int32_t mSampleRate;
     //int32_t mInterleaveDurationUs;
     //int32_t mIFramesIntervalSec;
     int32_t mCameraId = 0;
-    int32_t mVideoEncoderProfile;
-    int32_t mVideoEncoderLevel;
-    int32_t mMovieTimeScale;
-    int32_t mVideoTimeScale;
+    //int32_t mVideoEncoderProfile;
+    //int32_t mVideoEncoderLevel;
+    //int32_t mMovieTimeScale;
+    //int32_t mVideoTimeScale;
     //int32_t mAudioTimeScale;
     //int64_t mMaxFileSizeBytes;
     //int64_t mMaxFileDurationUs;
-    int64_t mTrackEveryTimeDurationUs;
+    //int64_t mTrackEveryTimeDurationUs;
     //int32_t mRotationDegrees;  // Clockwise 
 
 	sp<SurfaceComposerClient> mComposerClient;
@@ -418,8 +419,18 @@ static int translateColorToOmxEnumValue(int color) {
     }
 }
 
+int g_runLoop = 1;
+
+void sig_handler(int signum)
+{
+    g_runLoop = 0;
+    printf("Stopping...");
+}
+
 int main(int argc, char **argv)
 {
+	signal(SIGINT, sig_handler);
+    signal(SIGPIPE, sig_handler);
     android::ProcessState::self()->startThreadPool();
 
     DataSource::RegisterDefaultSniffers();
@@ -487,8 +498,9 @@ int main(int argc, char **argv)
     writer->addSource(encoder);
     writer->setMaxFileDuration(kDurationUs);
     CHECK_EQ(OK, writer->start());
-    while (!writer->reachedEOS()) {
+    while (!writer->reachedEOS() && g_runLoop) {
         fprintf(stderr, ".");
+		printf(".");
         usleep(100000);
     }
     err = writer->stop();
