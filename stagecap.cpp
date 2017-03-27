@@ -44,11 +44,11 @@ enum CameraFlags {
 
 using namespace android;
 
-static const int32_t kFramerate = 24;  // fps
+static const int32_t kFramerate = 30;  // fps
 static const int32_t kIFramesIntervalSec = 1;
-static const int32_t kVideoBitRate = 512 * 1024;
+static const int32_t kVideoBitRate = 2 * 512 * 1024;
 static const int32_t kAudioBitRate = 12200;
-static const int64_t kDurationUs = 10000000LL;  // 10 seconds
+static const int64_t kDurationUs = 30LL * 1000000LL;  // 10 seconds
 
 #define AUDIO_CAP 0
 #define DUMMY_SOURCE 0
@@ -228,9 +228,21 @@ public:
     output_format mOutputFormat;
     video_encoder mVideoEncoder;
     //bool mUse64BitFileOffset;
-    int32_t mVideoWidth = 320;
-	int32_t mVideoHeight = 240;
-    int32_t mFrameRate = 30;
+
+	//int32_t mVideoWidth = 320;
+	//int32_t mVideoHeight = 240;
+
+	// Not working for video
+	//int32_t mVideoWidth = 1600;
+	//int32_t mVideoHeight = 1200;
+
+	int32_t mVideoWidth = 640;
+	int32_t mVideoHeight = 480;
+
+	//int32_t mVideoWidth = 1280;
+	//int32_t mVideoHeight = 720;
+
+	int32_t mFrameRate = 30;
     //int32_t mVideoBitRate;
     //int32_t mAudioBitRate;
     //int32_t mAudioChannels;
@@ -307,6 +319,13 @@ sp<MediaSource> createSource(const char *filename)
 		CameraParameters params(mCamera->getParameters());
 		params.setPreviewSize(mVideoWidth, mVideoHeight);
 		params.setPreviewFrameRate(mFrameRate);
+		printf("exposure-compensation: %d\n", params.getInt("exposure-compensation"));
+		printf("min-exposure-compensation: %d\n", params.getInt("min-exposure-compensation"));
+		printf("max-exposure-compensation: %d\n", params.getInt("max-exposure-compensation"));
+		params.set("exposure-compensation", 0); // Driver doesn't seem to give a shit about it
+		params.set("preview-frame-rate-modes", "frame-rate-fixed");
+		params.set("preview-fps-range", "30000,30000");
+		//params.set(CameraParameters::KEY_JPEG_QUALITY, 90);
 		LOGI("Params set");
 		String8 s = params.flatten();
 		if (OK != mCamera->setParameters(s)) {
@@ -339,9 +358,9 @@ sp<MediaSource> createSource(const char *filename)
 
 		// create pushbuffer surface
 		// Method 1
-		#if 0
+		#if 1
 			mComposerClient = new SurfaceComposerClient();
-			mSurfaceControl = mComposerClient->createSurface(getpid(), 0, mVideoWidth, mVideoHeight, PIXEL_FORMAT_RGB_888 /*PIXEL_FORMAT_RGB_565*/, ISurfaceComposer::ePushBuffers); 
+			mSurfaceControl = mComposerClient->createSurface(getpid(), 0, mVideoWidth, mVideoHeight, 63 /*PIXEL_FORMAT_RGB_888*/, ISurfaceComposer::ePushBuffers); 
 
 			mComposerClient->openTransaction();
 			mSurfaceControl->setLayer(100000);
@@ -363,7 +382,7 @@ sp<MediaSource> createSource(const char *filename)
 		#endif
 
 		// Method 3
-		#if 1
+		#if 0
 			DisplayInfo dinfo;
 			mComposerClient = new SurfaceComposerClient();
 			status_t status = mComposerClient->getDisplayInfo(0, &dinfo);
@@ -477,8 +496,10 @@ int main(int argc, char **argv)
 
     sp<MetaData> enc_meta = new MetaData;
     //enc_meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_H263);
-    enc_meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_MPEG4);
-    //enc_meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_AVC);
+    //enc_meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_MPEG4);
+    enc_meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_AVC);
+	//enc_meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_RAW);
+	//enc_meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_H264);
     enc_meta->setInt32(kKeyWidth, width);
     enc_meta->setInt32(kKeyHeight, height);
     enc_meta->setInt32(kKeySampleRate, kFramerate);
@@ -491,15 +512,24 @@ int main(int argc, char **argv)
     //sp<MediaSource> encoder = OMXCodec::Create(client.interface(), enc_meta, true /* createEncoder */, decoder);
     LOGI("Creating encoder");
 	sp<MediaSource> encoder = OMXCodec::Create(client.interface(), enc_meta, true /* createEncoder */, source);
+	if (!encoder.get()) {
+		printf("Failed to create encoder\n");
+		return -1;
+	}
 
 #if 1
     LOGI("Creating writer");
 	sp<MPEG4Writer> writer = new MPEG4Writer("/sdcard/output.mp4");
+	if (!writer.get()) {
+		printf("Failed to create writer\n");
+		return -1;
+	}
     writer->addSource(encoder);
+	//writer->addSource(source);
     writer->setMaxFileDuration(kDurationUs);
     CHECK_EQ(OK, writer->start());
     while (!writer->reachedEOS() && g_runLoop) {
-        fprintf(stderr, ".");
+        //fprintf(stderr, "."); // Won't ssh without flush?
 		printf(".");
         usleep(100000);
     }
