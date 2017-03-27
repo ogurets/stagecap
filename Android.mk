@@ -13,7 +13,7 @@ LOCAL_SHARED_LIBRARIES := \
 	libbinder \
 	libmedia  \
 	libcamera_client \
-	
+	libsurfaceflinger_client
 	
 LOCAL_C_INCLUDES:= \
 	$(JNI_H_INCLUDE) \

@@ -1,3 +1,5 @@
+#define LOG_TAG "stagecap"
+
 #include <stdio.h>
 #include <utils/Log.h>
 #include <media/stagefright/CameraSource.h> 
@@ -18,8 +20,19 @@
 #include <camera/ICamera.h>
 #include <camera/Camera.h>
 #include <camera/CameraParameters.h>
+#include <camera/CameraHardwareInterface.h>
 
 #include <media/MediaRecorderBase.h>
+#include <ui/DisplayInfo.h>
+
+#include <surfaceflinger/Surface.h>
+#include <surfaceflinger/ISurface.h>
+#include <surfaceflinger/SurfaceComposerClient.h>
+#include <surfaceflinger/ISurfaceComposer.h>
+
+#include <binder/IServiceManager.h>
+#include <ui/Overlay.h>
+
 enum CameraFlags {
     FLAGS_SET_CAMERA = 1L << 0,
     FLAGS_HOT_CAMERA = 1L << 1,
@@ -40,6 +53,85 @@ static const int64_t kDurationUs = 10000000LL;  // 10 seconds
 #define DUMMY_SOURCE 0
 
 #if DUMMY_SOURCE == 1
+// TODO: implement
+class HwCameraSource : public MediaSource {
+private:
+    int mWidth, mHeight;
+    int mColorFormat;
+    size_t mSize;
+    int64_t mNumFramesOutput;
+	sp<CameraHardwareInterface> mCamera;
+
+    HwCameraSource(const HwCameraSource &);
+    HwCameraSource &operator=(const HwCameraSource &);
+
+public:
+    HwCameraSource(int width, int height, int colorFormat)
+        : mWidth(width),
+          mHeight(height),
+          mColorFormat(colorFormat),
+          mSize((width * height * 3) / 2) {
+
+		mCamera = HAL_openCameraHardware(int cameraId);
+
+        // Check the color format to make sure
+        // that the buffer size mSize it set correctly above.
+        CHECK(colorFormat == OMX_COLOR_FormatYUV420SemiPlanar ||
+              colorFormat == OMX_COLOR_FormatYUV420Planar);
+    }
+
+    virtual sp<MetaData> getFormat() {
+        sp<MetaData> meta = new MetaData;
+        meta->setInt32(kKeyWidth, mWidth);
+        meta->setInt32(kKeyHeight, mHeight);
+        meta->setInt32(kKeyColorFormat, mColorFormat);
+        meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_RAW);
+
+        return meta;
+    }
+
+    virtual status_t start(MetaData *params) {
+        mNumFramesOutput = 0;
+		mCamera->startRecording();
+        return OK;
+    }
+
+    virtual status_t stop() {
+		mCamera->stop();
+        return OK;
+    }
+
+    virtual status_t read(
+            MediaBuffer **buffer, const MediaSource::ReadOptions *options) {
+        if (mNumFramesOutput == kFramerate * 10) {
+            // Stop returning data after 10 secs.
+            return ERROR_END_OF_STREAM;
+        }
+
+        // printf("DummySource::read\n");
+        status_t err = mGroup.acquire_buffer(buffer);
+        if (err != OK) {
+            return err;
+        }
+
+        char x = (char)((double)rand() / RAND_MAX * 255);
+        memset((*buffer)->data(), x, mSize);
+        (*buffer)->set_range(0, mSize);
+        (*buffer)->meta_data()->clear();
+        (*buffer)->meta_data()->setInt64(
+                kKeyTime, (mNumFramesOutput * 1000000) / kFramerate);
+        ++mNumFramesOutput;
+
+        // printf("DummySource::read - returning buffer\n");
+        // LOGI("DummySource::read - returning buffer");
+        return OK;
+    }
+
+protected:
+    virtual ~HwCameraSource() {}
+};
+
+
 class DummySource : public MediaSource {
 
 public:
@@ -117,8 +209,16 @@ private:
 
 #endif
 
-sp<MediaSource> createSource(const char *filename)
-{
+// Private clause circumvention
+namespace android {
+class Test {
+public:
+    static const sp<ISurface>& getISurface(const sp<Surface>& s) {
+        return s->getISurface();
+    }
+};
+};
+
     sp<Camera> mCamera;
     //sp<IMediaRecorderClient> mListener;
     //sp<MediaWriter> mWriter;
@@ -127,8 +227,8 @@ sp<MediaSource> createSource(const char *filename)
     output_format mOutputFormat;
     video_encoder mVideoEncoder;
     bool mUse64BitFileOffset;
-    int32_t mVideoWidth = 640;
-	int32_t mVideoHeight = 480;
+    int32_t mVideoWidth = 320;
+	int32_t mVideoHeight = 240;
     int32_t mFrameRate = 30;
     int32_t mVideoBitRate;
     //int32_t mAudioBitRate;
@@ -146,16 +246,25 @@ sp<MediaSource> createSource(const char *filename)
     //int64_t mMaxFileDurationUs;
     int64_t mTrackEveryTimeDurationUs;
     //int32_t mRotationDegrees;  // Clockwise 
-	
+
+	sp<SurfaceComposerClient> mComposerClient;
+	sp<Surface> mPreviewSurface;
+
+	sp<SurfaceControl> mSurfaceControl;
+	sp<CameraSource> cameraSource;
+
 	String8 mParams;
     int mOutputFd;
     int32_t mFlags = 0;
 
+sp<MediaSource> createSource(const char *filename)
+{
 	sp<MediaSource> source;
     sp<MediaExtractor> extractor;
 
 	if (strncasecmp(filename, "camera", 6)) {
 		// Not camera
+		LOGI("Starting dummy source");
 		extractor = MediaExtractor::Create(new FileSource(filename));
 		if (extractor == NULL) {
 			return NULL;
@@ -184,17 +293,20 @@ sp<MediaSource> createSource(const char *filename)
 		return source;
 	} else {
 		// Camera
+		LOGI("Starting camera");
         mCamera = Camera::connect(mCameraId);
         if (mCamera == 0) {
             LOGE("Camera connection could not be established.");
             return NULL;
         }
         mFlags &= ~FLAGS_HOT_CAMERA;
-        mCamera->lock(); 
+        mCamera->lock();
+		LOGI("Camera lock success");
 
 		CameraParameters params(mCamera->getParameters());
 		params.setPreviewSize(mVideoWidth, mVideoHeight);
 		params.setPreviewFrameRate(mFrameRate);
+		LOGI("Params set");
 		String8 s = params.flatten();
 		if (OK != mCamera->setParameters(s)) {
 			LOGE("Could not change settings."
@@ -203,6 +315,7 @@ sp<MediaSource> createSource(const char *filename)
 		}
 		CameraParameters newCameraParams(mCamera->getParameters());
 
+		LOGI("Param checkup started");
 		// Check on video frame size
 		int frameWidth = 0, frameHeight = 0;
 		newCameraParams.getPreviewSize(&frameWidth, &frameHeight);
@@ -220,7 +333,69 @@ sp<MediaSource> createSource(const char *filename)
 				 "frame rate is %d", mFrameRate, frameRate);
 		}
 
-		return CameraSource::CreateFromCamera(mCamera);
+		// This CHECK is good, since we just passed the lock/unlock
+		// check earlier by calling mCamera->setParameters().
+
+		// create pushbuffer surface
+		// Method 1
+		#if 0
+			mComposerClient = new SurfaceComposerClient();
+			mSurfaceControl = mComposerClient->createSurface(getpid(), 0, mVideoWidth, mVideoHeight, PIXEL_FORMAT_RGB_888 /*PIXEL_FORMAT_RGB_565*/, ISurfaceComposer::ePushBuffers); 
+
+			mComposerClient->openTransaction();
+			mSurfaceControl->setLayer(100000);
+			mComposerClient->closeTransaction();
+
+			mPreviewSurface = mSurfaceControl->getSurface();
+		#endif
+
+		// Method 2
+		#if 0
+			const String16 svname("SurfaceFlinger");
+			const String8 surfname("hwsurf");
+			sp<ISurfaceComposer> composer;
+			getService(svname, &composer);
+			mComposerClient = composer->createClientConnection();
+
+			ISurfaceComposerClient::surface_data_t surfparams;
+			mPreviewSurface = mComposerClient->createSurface(&surfparams, getpid(), surfname, 0, mVideoWidth, mVideoHeight, PIXEL_FORMAT_RGB_888 /*PIXEL_FORMAT_RGB_565*/, ISurfaceComposer::ePushBuffers);
+		#endif
+
+		// Method 3
+		#if 1
+			DisplayInfo dinfo;
+			mComposerClient = new SurfaceComposerClient();
+			status_t status = mComposerClient->getDisplayInfo(0, &dinfo);
+			if (status) {
+				LOGE("Cannot get display info");
+				return NULL; 
+			}
+			mSurfaceControl = mComposerClient->createSurface(getpid(), 0, mVideoWidth, mVideoHeight, PIXEL_FORMAT_RGB_888, ISurfaceComposer::ePushBuffers);
+
+			mComposerClient->openTransaction();
+			mSurfaceControl->setLayer(0x40000000);
+			mComposerClient->closeTransaction();
+
+			mPreviewSurface = mSurfaceControl->getSurface(); 
+		#endif
+
+		if (!mPreviewSurface.get()) {
+			LOGE("Surface was not created");
+			return NULL;
+		}
+
+		/*sp<ISurface> isurface = Test::getISurface(mPreviewSurface);
+		sp<OverlayRef> ref = isurface->createOverlay(mVideoWidth, mVideoHeight, OVERLAY_FORMAT_DEFAULT, 0); 
+		if (!ref.get()) {
+			LOGE("Overlay cannot be created");
+			return NULL;
+		}*/
+
+		CHECK_EQ(OK, mCamera->setPreviewDisplay(mPreviewSurface)); // Needed even for recording
+	
+		LOGI("Constructing camerasource");
+		cameraSource = CameraSource::CreateFromCamera(mCamera);
+		return cameraSource;
 	}
 }
 
@@ -278,9 +453,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    sp<MetaData> meta = source->getFormat();
+    LOGI("CameraSource created");
+	sp<MetaData> meta = source->getFormat();
 
-    sp<MediaSource> decoder = OMXCodec::Create(client.interface(), meta, false /* createEncoder */, source);
+    //sp<MediaSource> decoder = OMXCodec::Create(client.interface(), meta, false /* createEncoder */, source);
 
     int width, height;
     bool success = meta->findInt32(kKeyWidth, &width);
@@ -289,9 +465,9 @@ int main(int argc, char **argv)
 #endif
 
     sp<MetaData> enc_meta = new MetaData;
-    // enc_meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_H263);
-    // enc_meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_MPEG4);
-    enc_meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_AVC);
+    //enc_meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_H263);
+    enc_meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_MPEG4);
+    //enc_meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_AVC);
     enc_meta->setInt32(kKeyWidth, width);
     enc_meta->setInt32(kKeyHeight, height);
     enc_meta->setInt32(kKeySampleRate, kFramerate);
@@ -301,10 +477,13 @@ int main(int argc, char **argv)
     enc_meta->setInt32(kKeyIFramesInterval, kIFramesIntervalSec);
     enc_meta->setInt32(kKeyColorFormat, colorFormat);
 
-    sp<MediaSource> encoder = OMXCodec::Create(client.interface(), enc_meta, true /* createEncoder */, decoder);
+    //sp<MediaSource> encoder = OMXCodec::Create(client.interface(), enc_meta, true /* createEncoder */, decoder);
+    LOGI("Creating encoder");
+	sp<MediaSource> encoder = OMXCodec::Create(client.interface(), enc_meta, true /* createEncoder */, source);
 
 #if 1
-    sp<MPEG4Writer> writer = new MPEG4Writer("/sdcard/output.mp4");
+    LOGI("Creating writer");
+	sp<MPEG4Writer> writer = new MPEG4Writer("/sdcard/output.mp4");
     writer->addSource(encoder);
     writer->setMaxFileDuration(kDurationUs);
     CHECK_EQ(OK, writer->start());
